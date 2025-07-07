@@ -52,6 +52,7 @@ namespace ns3{
 	bool Settings::use_xrc = false;
 	bool Settings::use_dct = false;
 	bool Settings::use_weir = false;
+	bool Settings::use_symphony = false;
 	bool Settings::use_valve = false; 
 
 	// for floodgate

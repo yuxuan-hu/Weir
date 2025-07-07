@@ -613,9 +613,10 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch){
 	// 收到ack，数据传输完成，wqe数量减一
 	bool delay = false;
 	if(Settings::use_rnic_cache){
-		// for weir
+		// for weir and symphony
+		// symphony 和 weir 的控速机制在仿真中可以认为本质是一样的，区别在于 symphony 需要在接收端也进行控速的
 		/*[Delay Monitor]*/
-		if(Settings::use_weir){  // weir mode after receiving ack
+		if(Settings::use_weir || Settings::use_symphony){  // weir mode after receiving ack
 			uint64_t rtt = Simulator::Now().GetTimeStep() - ch.ack.ih.ts;
 			qp->pre_rtt = qp->cur_rtt;
 			qp->cur_rtt = rtt;
@@ -624,7 +625,7 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch){
 		uint32_t nic_idx = GetNicIdxOfQp(qp);
 		// mtt mpt nothing to do
 		// wqe
-	if(!Settings::use_weir){
+	if(!Settings::use_weir || !Settings::use_symphony){
 		m_nic[nic_idx].dev->wqecache.decrement();
 	}
 		// qpc
@@ -926,12 +927,16 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp){
 			// random pcie bw
 			uint64_t random_pcie_bw = GetRandomPCIeBW();
 			extra_pcie_bw += random_pcie_bw;
+			if(Settings::use_symphony){
+				// 由于 symphony 会进一步降低 WQE 的数量，因此实际上需要的额外带宽会进一步减少，由于实现上的方便性，不重新构建RWQE，而且前面完全没有考虑WQE，因此把优化放在这里，方便一些
+				extra_pcie_bw -= 3;
+			}
 		}else{
 			extra_pcie_bw += 0;
 		}
 		// wqe （首先需要获取 nic idx ）
 		uint32_t nic_idx = GetNicIdxOfQp(qp);
-	if(!Settings::use_weir){
+	if(!Settings::use_weir || !Settings::use_symphony){
 		if(m_nic[nic_idx].dev->wqecache.contains()){
 			extra_pcie_bw += 0;
 		}else{

@@ -40,7 +40,7 @@
 namespace ns3 {
 
 /*[hyx]*/
-// for weir
+// for weir and symphony
 #define INC 5  // ns
 #define DEC 5
 
@@ -101,7 +101,7 @@ class QpcCache
 
 class RdmaEgressQueue : public Object{
 public:
-  // for weir
+  // for weir and symphony
   uint64_t total_active_qp_num;
 
 	static const uint32_t qCnt = 8;

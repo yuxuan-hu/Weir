@@ -87,6 +87,7 @@ public:
 	static bool use_xrc;
 	static bool use_dct;
 	static bool use_weir;
+	static bool use_symphony;
 	static bool use_valve;
 	// static bool use_...;
 

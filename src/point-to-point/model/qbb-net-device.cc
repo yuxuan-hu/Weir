@@ -186,7 +186,7 @@ namespace ns3 {
 	}
 
 	RdmaEgressQueue::RdmaEgressQueue(){
-		// for weir
+		// for weir and symphony
 		total_active_qp_num = 0;
 
 		m_rrlast = 0;
@@ -222,14 +222,14 @@ namespace ns3 {
 		uint32_t fcount = m_qpGrp->GetN();
 		/*[Active QP Monitor]*/
 		// init to 0
-		if(Settings::use_weir){
+		if(Settings::use_weir || Settings::use_symphony){
 			total_active_qp_num = 0;
 		}
 
 		for (qIndex = 1; qIndex <= fcount; qIndex++){
 			Ptr<RdmaQueuePair> qp = m_qpGrp->Get((qIndex + m_rrlast) % fcount);
-			// for weir
-			if(Settings::use_weir){
+			// for weir and symphony
+			if(Settings::use_weir || Settings::use_symphony){
 				if(qp->GetBytesLeft() > 0){
 					total_active_qp_num++;
 				}
@@ -395,9 +395,9 @@ namespace ns3 {
 				/*[hyx]*/
 				double delay = 0;
 				if(Settings::use_rnic_cache){
-					// for Weir
+					// for Weir and Symphony
 					/*[Rate Limiter]*/
-					if(Settings::use_weir){
+					if(Settings::use_weir || Settings::use_symphony){
 						// std::cout<<"[Weir] qIndex: "<<qIndex<<std::endl;
 						// 这里 qIndex 有可能为 -1 ，因此需要加上高优先级队列的处理，否则会出现错误，类似于溢出那种的错误 SIGSEGV ，超出了 qIndex 的可选范围      
 						/*
@@ -425,6 +425,10 @@ namespace ns3 {
 						}
 
 						// update wqe posting delay 
+						if(Settings::use_symphony){
+							// 由于无需软硬件时间钟同步，symphony会比weir少一些延迟，因此delay会减半
+							lastQp->cur_gap = lastQp->cur_gap / 3;
+						}
 						delay += lastQp->cur_gap / 1e9;  // ns -> s
 					}
 
@@ -448,11 +452,15 @@ namespace ns3 {
 					int mtt_mpt_probability = generateMttMptProbability();
 					if(mtt_mpt_probability == 0){
 						delay += PCIeDelay / 1e6;  // us -> s
+						if(Settings::use_symphony){
+							// 由于symphony进一步减少了rwqe，因此，这里所需的mtt，mpt也进一步减少，相应的减少时延的处理
+							delay -= PCIeDelay / (2 * 1e6);
+						}
 					}else{
 						delay += 0;	 // no delay
 					}
 					// wqe
-				if(!Settings::use_weir){  // for weir
+				if(!Settings::use_weir || !Settings::use_symphony){  // for weir and symphony
 				// 没有使用 weir 才需要考虑 wqe cache ，使用 weir 之后，认为 wqe cache 很少，可以忽略不记其 cache miss  
 					if(wqecache.contains()){
 						delay += 0;
@@ -508,7 +516,7 @@ namespace ns3 {
 				if(Settings::use_rnic_cache){
 					// mtt mpt nothing to do
 					// wqe add 1
-				if(!Settings::use_weir){
+				if(!Settings::use_weir || !Settings::use_symphony){
 					wqecache.increment();
 				}
 					// qpc insert qpid for lastQp

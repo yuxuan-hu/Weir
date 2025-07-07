@@ -192,7 +192,7 @@ TypeId RdmaQueuePair::GetTypeId (void)
 
 RdmaQueuePair::RdmaQueuePair(uint16_t pg, Ipv4Address _sip, Ipv4Address _dip, uint16_t _sport, uint16_t _dport){
 	/*[hyx]*/
-	// for weir
+	// for weir and symphony
 	pre_rtt = 0;
 	cur_rtt = 0;
 	base_gap = 50;  // ns

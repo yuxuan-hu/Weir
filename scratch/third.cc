@@ -2554,6 +2554,15 @@ int main(int argc, char *argv[])
 					Settings::use_weir = false;
 				}
 				std::cout << "WEIR\t\t\t\t" << Settings::use_weir << '\n';
+			}else if(key.compare("Symphony") == 0){
+				uint32_t symphony_int;
+				conf >> symphony_int;
+				if(symphony_int == 1){
+					Settings::use_symphony = true;
+				}else{
+					Settings::use_symphony = false;
+				}
+				std::cout << "Symphony\t\t\t\t" << Settings::use_symphony << '\n';
 			}else if(key.compare("VALVE") == 0){
 				uint32_t valve_int;
 				conf >> valve_int;
@@ -2643,7 +2652,7 @@ int main(int argc, char *argv[])
 	else if (cc_mode == 3) // hpcc, use int
 		IntHeader::mode = 0;
 	else if (cc_mode == 1){  // dcqcn, use ts for rtt (delay) calculation
-		if(Settings::use_weir){	 // weir mode 
+		if(Settings::use_weir || Settings::use_symphony){	 // weir and symphony mode 
 			IntHeader::mode = 1;
 		}else{
 			IntHeader::mode = 5;
