@@ -39,6 +39,10 @@
 
 namespace ns3 {
 
+// 前向声明 (Janus)
+class QpcPrefetchPredictor;
+class NopWqeManager;
+
 /*[hyx]*/
 // for weir
 #define INC 5  // ns
@@ -73,30 +77,69 @@ class WqeCache
 
 // 构建QPC缓存资源的建模，以Mellanox CX6（100Gbps）为例，网卡最多可以容纳1024个QPC，超出的话随机丢弃
 #define MAX_QPC_NUM 1024
+
+/*[hyx]*/
+// NOP WQE 相关参数 (Janus)
+#define NOP_WQE_DOORBELL_LATENCY 0.5  // us, WQE Doorbell 写入延迟
+#define NOP_WQE_CQE_LATENCY 0.3       // us, CQE 回收延迟
+
 struct QpcInfo
 {
 	uint32_t qpc_id;
   QpcInfo* next;
   QpcInfo(uint32_t value): qpc_id(value), next(nullptr) {}
 };
+
+/*[hyx]*/
+// LRU 双向链表节点 (Janus)
+struct QpcNode
+{
+    uint32_t qpc_id;
+    QpcNode* prev;
+    QpcNode* next;
+    bool is_prefetched;          // 是否通过预取进入
+    uint64_t insert_time;        // 插入时间 (ns)
+    uint64_t last_access_time;   // 最后访问时间 (ns)
+    QpcNode(uint32_t value) : qpc_id(value), prev(nullptr), next(nullptr),
+        is_prefetched(false), insert_time(0), last_access_time(0) {}
+};
+
 class QpcCache
 {
   private:
+    // 原始随机替换模式（向后兼容）
     QpcInfo* head;
     QpcInfo* tail;
     uint32_t qpc_num;
+    /*[hyx]*/
+    // LRU 模式 (Janus)
+    QpcNode* lru_head;   // LRU 头（最近使用）
+    QpcNode* lru_tail;   // LRU 尾（最久未使用，替换目标）
+    std::map<uint32_t, QpcNode*> lru_map; // 快速查找
+    uint32_t lru_num;
+    uint32_t lru_capacity;  // LRU 容量（根据 XRC 模式动态调整）
   public:
-    QpcCache(): head(nullptr), tail(nullptr), qpc_num(0) {};
+    QpcCache(): head(nullptr), tail(nullptr), qpc_num(0),
+        lru_head(nullptr), lru_tail(nullptr), lru_num(0), lru_capacity(MAX_QPC_NUM) {};
     ~QpcCache(){
       while(head != nullptr){
         QpcInfo* temp = head;
         head = head->next;
         delete temp;
       }
+      while(lru_head != nullptr){
+        QpcNode* temp = lru_head;
+        lru_head = lru_head->next;
+        delete temp;
+      }
     };
     bool contains(uint32_t value);
-    void insert(uint32_t value);
+    uint32_t insert(uint32_t value, bool is_prefetched = false); // 返回被替换的 QPC ID，0xFFFFFFFF 表示无替换
+    /*[hyx]*/
+    void touch(uint32_t value);      // 标记最近使用（移到 LRU 链表头部）(Janus)
+    void remove(uint32_t value);     // 从缓存中移除 (Janus)
     void print();
+    uint32_t size();                 // 当前缓存中的 QPC 数量 (Janus)
 };
 
 class RdmaEgressQueue : public Object{
@@ -149,6 +192,19 @@ public:
 	// 网卡缓存资源建模
 	WqeCache wqecache;
 	QpcCache qpccache;
+
+	/*[hyx]*/
+	// Janus: QPC 预取相关
+	QpcPrefetchPredictor* m_prefetchPredictor;
+	NopWqeManager* m_nopWqeManager;
+
+	/*[hyx]*/
+	// Janus: QPC 预取方法
+	void PerformPrefetch();              // 执行预取
+	void ScheduleNextPrefetchCycle();    // 调度下一个预取周期
+	void IssueNopWqeForPrefetch(uint32_t qpc_id); // 发出 NOP WQE 进行预取
+	void OnNopWqeComplete(uint32_t qpc_id);  // NOP WQE 完成回调
+	void InitPrefetch();                 // 初始化预取系统
 
   // for DCT
   int last_qIndex;

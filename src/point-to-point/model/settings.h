@@ -90,6 +90,17 @@ public:
 	static bool use_valve;
 	// static bool use_...;
 
+	/*[hyx]*/
+	// for Janus: QPC Prefetch scheme
+	static bool use_janus;                  // 是否启用 Janus 预取方案
+	static uint32_t prefetch_mode;         // 预取模式 (0=off, 1=oracle, 2=statistical, 3=lru)
+	static uint64_t prefetch_ahead_time;  // 预取提前时间 (ns)
+	static uint64_t prefetch_interval;    // 预取周期间隔 (ns)
+	static uint32_t prefetch_hot_threshold; // 热点访问阈值
+	static uint64_t prefetch_history_window; // 历史窗口 (ns)
+	static uint32_t max_prefetch_per_cycle;  // 每周期最大预取数
+	static bool qpc_cache_lru;            // 是否使用 LRU 替换策略
+
 	/*---------------------For Floodgate-------------*/
 	/**
 	 * The map between hosts' IP and ID

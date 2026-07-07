@@ -52,7 +52,18 @@ namespace ns3{
 	bool Settings::use_xrc = false;
 	bool Settings::use_dct = false;
 	bool Settings::use_weir = false;
-	bool Settings::use_valve = false; 
+	bool Settings::use_valve = false;
+
+	/*[hyx]*/
+	// for Janus: QPC Prefetch scheme
+	bool Settings::use_janus = false;
+	uint32_t Settings::prefetch_mode = 0;
+	uint64_t Settings::prefetch_ahead_time = 1650;     // ~1.65us in ns
+	uint64_t Settings::prefetch_interval = 1000000;     // 1ms in ns
+	uint32_t Settings::prefetch_hot_threshold = 5;
+	uint64_t Settings::prefetch_history_window = 10000000; // 10ms in ns
+	uint32_t Settings::max_prefetch_per_cycle = 16;
+	bool Settings::qpc_cache_lru = false;
 
 	// for floodgate
 	std::map<uint32_t, uint32_t> Settings::hostIp2IdMap;

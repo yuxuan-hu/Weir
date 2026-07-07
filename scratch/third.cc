@@ -42,6 +42,10 @@
 #include <ns3/sim-setting.h>
 #include <ns3/settings.h>
 #include <ns3/flow-generator.h>
+/*[hyx]*/
+// Janus: QPC Prefetch
+#include <ns3/qpc-prefetch-predictor.h>
+#include <ns3/nop-wqe-manager.h>
 #include <numeric>
 #include <climits>
 
@@ -2563,6 +2567,56 @@ int main(int argc, char *argv[])
 					Settings::use_valve = false;
 				}
 				std::cout << "VALVE\t\t\t\t" << Settings::use_valve << '\n';
+			/*[hyx]*/
+			// Janus: QPC Prefetch 配置解析
+			}else if(key.compare("JANUS") == 0){
+				uint32_t prefetch_int;
+				conf >> prefetch_int;
+				if(prefetch_int == 1){
+					Settings::use_janus = true;
+				}else{
+					Settings::use_janus = false;
+				}
+				std::cout << "JANUS\t\t\t" << Settings::use_janus << '\n';
+			}else if(key.compare("PREFETCH_MODE") == 0){
+				uint32_t mode_int;
+				conf >> mode_int;
+				Settings::prefetch_mode = mode_int;
+				std::cout << "PREFETCH_MODE\t\t\t" << Settings::prefetch_mode << '\n';
+			}else if(key.compare("PREFETCH_AHEAD_TIME") == 0){
+				uint64_t ahead_time;
+				conf >> ahead_time;
+				Settings::prefetch_ahead_time = ahead_time;
+				std::cout << "PREFETCH_AHEAD_TIME\t\t" << Settings::prefetch_ahead_time << '\n';
+			}else if(key.compare("PREFETCH_INTERVAL") == 0){
+				uint64_t interval;
+				conf >> interval;
+				Settings::prefetch_interval = interval;
+				std::cout << "PREFETCH_INTERVAL\t\t" << Settings::prefetch_interval << '\n';
+			}else if(key.compare("PREFETCH_HOT_THRESHOLD") == 0){
+				uint32_t threshold;
+				conf >> threshold;
+				Settings::prefetch_hot_threshold = threshold;
+				std::cout << "PREFETCH_HOT_THRESHOLD\t\t" << Settings::prefetch_hot_threshold << '\n';
+			}else if(key.compare("PREFETCH_HISTORY_WINDOW") == 0){
+				uint64_t window;
+				conf >> window;
+				Settings::prefetch_history_window = window;
+				std::cout << "PREFETCH_HISTORY_WINDOW\t\t" << Settings::prefetch_history_window << '\n';
+			}else if(key.compare("MAX_PREFETCH_PER_CYCLE") == 0){
+				uint32_t max_prefetch;
+				conf >> max_prefetch;
+				Settings::max_prefetch_per_cycle = max_prefetch;
+				std::cout << "MAX_PREFETCH_PER_CYCLE\t\t" << Settings::max_prefetch_per_cycle << '\n';
+			}else if(key.compare("QPC_CACHE_LRU") == 0){
+				uint32_t lru_int;
+				conf >> lru_int;
+				if(lru_int == 1){
+					Settings::qpc_cache_lru = true;
+				}else{
+					Settings::qpc_cache_lru = false;
+				}
+				std::cout << "QPC_CACHE_LRU\t\t\t" << Settings::qpc_cache_lru << '\n';
 			}
 
 			fflush(stdout);
@@ -3483,6 +3537,42 @@ int main(int argc, char *argv[])
 	//
 	std::cout << "Running Simulation. Simulation will stop at " << simulator_stop_time << "s" << std::endl;;
 	fflush(stdout);
+
+	/*[hyx] Janus 初始化 */
+	if(Settings::use_janus){
+		std::cout << "[Janus] Initializing QPC prefetch system, mode=" 
+		          << Settings::prefetch_mode << " LRU=" << Settings::qpc_cache_lru << std::endl;
+		for(uint32_t i = 0; i < n.GetN(); i++){
+			if(n.Get(i)->GetNodeType() == 0){ // host node
+				for(uint32_t j = 0; j < n.Get(i)->GetNDevices(); j++){
+					Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(n.Get(i)->GetDevice(j));
+					if(dev){
+						dev->InitPrefetch();
+					}
+				}
+			}
+		}
+		/*[hyx]*/
+		// Janus: Oracle 模式注册未来流
+		if(Settings::prefetch_mode == 1){
+			std::cout << "[Janus] Oracle mode: registering " << flows_map.size() << " future flows" << std::endl;
+			for(auto& [flow_id, flow] : flows_map){
+				uint32_t src = flow.src;
+				uint32_t qp_id = flow.qp_id;
+				uint64_t start_ns = flow.startTime.GetNanoSeconds();
+				// 注册到发送端 host 的所有 device 的 predictor
+				if(n.Get(src)->GetNodeType() == 0){
+					for(uint32_t j = 0; j < n.Get(src)->GetNDevices(); j++){
+						Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(n.Get(src)->GetDevice(j));
+						if(dev && dev->m_prefetchPredictor){
+							dev->m_prefetchPredictor->AddFutureFlow(qp_id, start_ns);
+						}
+					}
+				}
+			}
+		}
+	}
+
 	NS_LOG_INFO("Run Simulation.");
 	Simulator::Stop(Seconds(simulator_stop_time));
 	Simulator::Run();
@@ -3554,6 +3644,25 @@ int main(int argc, char *argv[])
 	std::cout << "maxSwitchLength: " <<  Settings::max_switch_length << std::endl;
 	std::cout << "Timeout triggers: " << Settings::timeout_times << std::endl;
 	std::cout << "Drop packets: " << Settings::drop_packets << std::endl;
+
+	/*[hyx] Janus 统计输出 */
+	if(Settings::use_janus){
+		std::cout << "\n===== Janus Statistics =====" << std::endl;
+		for(uint32_t i = 0; i < n.GetN(); i++){
+			if(n.Get(i)->GetNodeType() == 0){
+				for(uint32_t j = 0; j < n.Get(i)->GetNDevices(); j++){
+					Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(n.Get(i)->GetDevice(j));
+					if(dev && dev->m_prefetchPredictor && dev->m_nopWqeManager){
+						std::cout << "  Node " << n.Get(i)->GetId() << " Device " << j << ":" << std::endl;
+						dev->m_prefetchPredictor->PrintStats();
+						dev->m_nopWqeManager->PrintStats();
+						std::cout << "  QPC Cache Size: " << dev->qpccache.size() << std::endl;
+					}
+				}
+			}
+		}
+		std::cout << "===================================" << std::endl;
+	}
 
 	std::cout << "maxSwitchVOQBuffer: " <<  Settings::max_switch_voq_length << "\tmaxVOQLength: " <<  Settings::max_voq_length << std::endl;
 	std::cout << "maxUsedVOQNum: " << VOQ::maxVOQNum << "\tmaxActiveDstNum: " << VOQ::maxActiveDstNum << std::endl;

@@ -24,6 +24,8 @@ def build(bld):
 		'model/function.cc',
 		'model/flow-generator.cc',
 		'model/settings.cc',
+		'model/qpc-prefetch-predictor.cc',
+		'model/nop-wqe-manager.cc',
 		'util/voq.cc',
 		'util/voq-group.cc',
 		'util/hash-functions.cc'
@@ -59,6 +61,8 @@ def build(bld):
 		'model/function.h',
 		'model/flow-generator.h',
 		'model/settings.h',
+		'model/qpc-prefetch-predictor.h',
+		'model/nop-wqe-manager.h',
 		'util/voq.h',
 		'util/voq-group.h',
 		'util/hash-functions.h'

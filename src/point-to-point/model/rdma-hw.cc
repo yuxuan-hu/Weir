@@ -293,7 +293,15 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 		/*[hyx]*/
 		// 添加qpid，只有在使用rnic cache时才会添加
 		if(Settings::use_rnic_cache){
-			m_nic[nic_idx].dev->qpccache.insert(qpid);
+			uint32_t evicted_id = m_nic[nic_idx].dev->qpccache.insert(qpid);
+			/*[hyx]*/
+			// Janus: 如果有 QPC 被替换，更新预取管理器和预测器
+			if(evicted_id != 0xFFFFFFFF && m_nic[nic_idx].dev->m_nopWqeManager){
+				m_nic[nic_idx].dev->m_nopWqeManager->CheckAndMarkUselessPrefetch(evicted_id);
+			}
+			if(evicted_id != 0xFFFFFFFF && m_nic[nic_idx].dev->m_prefetchPredictor){
+				m_nic[nic_idx].dev->m_prefetchPredictor->UpdateCacheStatus(evicted_id, false);
+			}
 		}
 
 		// set init variables
@@ -632,8 +640,34 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch){
 		if(!Settings::use_dct){
 			// DCT 不会造成 qpc 的丢失，因此只有非 DCT 的方案才需要考虑 qpc cache 是否在 list 之中的情况
 			if(!m_nic[nic_idx].dev->qpccache.contains(qp->m_qpid)){
-				m_nic[nic_idx].dev->qpccache.insert(qp->m_qpid);
+				uint32_t evicted_id = m_nic[nic_idx].dev->qpccache.insert(qp->m_qpid);
+				/*[hyx]*/
+				// Janus: 如果有 QPC 被替换，更新预取管理器和预测器
+				if(evicted_id != 0xFFFFFFFF && m_nic[nic_idx].dev->m_nopWqeManager){
+					m_nic[nic_idx].dev->m_nopWqeManager->CheckAndMarkUselessPrefetch(evicted_id);
+				}
+				if(evicted_id != 0xFFFFFFFF && m_nic[nic_idx].dev->m_prefetchPredictor){
+					m_nic[nic_idx].dev->m_prefetchPredictor->UpdateCacheStatus(evicted_id, false);
+				}
+				/*[hyx]*/
+				// Janus: 记录 ACK 路径的 QPC 访问（cache miss）
+				if(m_nic[nic_idx].dev->m_prefetchPredictor && Settings::use_janus){
+					m_nic[nic_idx].dev->m_prefetchPredictor->RecordAccess(qp->m_qpid, false);
+				}
 				delay = true;
+			}else{
+				/*[hyx]*/
+				// Janus: ACK 路径 QPC cache hit
+				// LRU: 将被访问的 QPC 移到头部，防止被过早驱逐
+				m_nic[nic_idx].dev->qpccache.touch(qp->m_qpid);
+				// 记录 ACK 路径的 QPC 访问（cache hit）
+				if(m_nic[nic_idx].dev->m_prefetchPredictor && Settings::use_janus){
+					m_nic[nic_idx].dev->m_prefetchPredictor->RecordAccess(qp->m_qpid, true);
+				}
+				// 标记预取 QPC 已被使用
+				if(m_nic[nic_idx].dev->m_nopWqeManager && Settings::use_janus){
+					m_nic[nic_idx].dev->m_nopWqeManager->MarkPrefetchUsed(qp->m_qpid);
+				}
 			}
 		}
 	}
@@ -954,6 +988,14 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp){
 			// DCT 不会造成 qpc 的丢失，因此只有非 DCT 的方案才需要考虑 qpc cache 是否在 list 之中的情况
 			if(m_nic[nic_idx].dev->qpccache.contains(qp->m_qpid)){
 				extra_pcie_bw += 0;
+				/*[hyx]*/
+				// Janus: LRU 标记最近使用
+				m_nic[nic_idx].dev->qpccache.touch(qp->m_qpid);
+			}else if(Settings::use_janus && m_nic[nic_idx].dev->m_nopWqeManager && 
+			         m_nic[nic_idx].dev->m_nopWqeManager->IsPrefetching(qp->m_qpid)){
+				/*[hyx]*/
+				// Janus: QPC 正在预取中，使用部分带宽惩罚
+				extra_pcie_bw += 2; // 减少为 2 Gbps（原本 6 Gbps）
 			}else{
 				extra_pcie_bw += 6;
 				// random pcie bw

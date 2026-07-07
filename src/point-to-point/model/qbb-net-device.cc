@@ -47,6 +47,10 @@
 #include "ns3/pointer.h"
 #include "ns3/custom-header.h"
 #include "ns3/settings.h"
+/*[hyx]*/
+// Janus: QPC Prefetch
+#include "ns3/qpc-prefetch-predictor.h"
+#include "ns3/nop-wqe-manager.h"
 
 #include <iostream>
 
@@ -97,7 +101,12 @@ namespace ns3 {
 	}
 
 	// QPC建模
+	/*[hyx]*/
+	// Janus: LRU 模式支持
 	bool QpcCache::contains(uint32_t value){
+		if(Settings::qpc_cache_lru){
+			return lru_map.find(value) != lru_map.end();
+		}
 		QpcInfo* cur = head;
 		while(cur != nullptr){
 			if(cur->qpc_id == value){
@@ -108,65 +117,174 @@ namespace ns3 {
 		return false;
 	}
 
-	void QpcCache::insert(uint32_t value){
-		if(QpcCache::contains(value)){
-			return;
+	/*[hyx]*/
+	// LRU 辅助：将节点移到链表头部 (Janus)
+	static void LruMoveToHead(QpcNode*& lru_head, QpcNode*& lru_tail, QpcNode* node){
+		if(node == lru_head) return; // 已经在头部
+		// 从当前位置摘除
+		if(node->prev) node->prev->next = node->next;
+		if(node->next) node->next->prev = node->prev;
+		if(node == lru_tail) lru_tail = node->prev;
+		// 插入头部
+		node->prev = nullptr;
+		node->next = lru_head;
+		if(lru_head) lru_head->prev = node;
+		lru_head = node;
+		if(!lru_tail) lru_tail = node;
+	}
+
+	uint32_t QpcCache::insert(uint32_t value, bool is_prefetched){
+		uint32_t evicted_id = 0xFFFFFFFF; // 0xFFFFFFFF 表示无替换
+		if(Settings::qpc_cache_lru){
+			// LRU 模式
+			// 更新容量（XRC 模式翻倍）
+			if(Settings::use_xrc){
+				lru_capacity = MAX_QPC_NUM * 2;
+			}else{
+				lru_capacity = MAX_QPC_NUM;
+			}
+			// 如果已存在，移到头部并更新访问时间
+			auto it = lru_map.find(value);
+			if(it != lru_map.end()){
+				it->second->last_access_time = Simulator::Now().GetNanoSeconds();
+				LruMoveToHead(lru_head, lru_tail, it->second);
+				return evicted_id;
+			}
+			// 创建新节点
+			QpcNode* newNode = new QpcNode(value);
+			newNode->is_prefetched = is_prefetched;
+			newNode->insert_time = Simulator::Now().GetNanoSeconds();
+			newNode->last_access_time = Simulator::Now().GetNanoSeconds();
+			// 检查是否满
+			if(lru_num >= lru_capacity){
+				// 替换 LRU 尾部节点
+				QpcNode* victim = lru_tail;
+				if(victim){
+					evicted_id = victim->qpc_id;
+					lru_map.erase(victim->qpc_id);
+					if(victim->prev) victim->prev->next = nullptr;
+					lru_tail = victim->prev;
+					if(lru_tail == nullptr) lru_head = nullptr;
+					delete victim;
+					lru_num--;
+				}
+			}
+			// 插入头部
+			newNode->next = lru_head;
+			if(lru_head) lru_head->prev = newNode;
+			lru_head = newNode;
+			if(!lru_tail) lru_tail = newNode;
+			lru_map[value] = newNode;
+			lru_num++;
+		}else{
+			// 原始随机替换模式
+			if(QpcCache::contains(value)){
+				return evicted_id;
+			}
+			if(!Settings::use_xrc){
+				if(qpc_num < MAX_QPC_NUM){
+					qpc_num++;
+					QpcInfo* newQpc = new QpcInfo(value);
+					if(head == nullptr){
+						head = newQpc;
+						tail = newQpc;
+					}else{
+						tail->next = newQpc;
+						tail = newQpc;
+					}
+				}else{
+					std::random_device rd;
+					std::mt19937 gen(rd());
+					std::uniform_int_distribution<> dis(0, MAX_QPC_NUM-1);
+					uint32_t index = dis(gen);
+					QpcInfo* cur = head;
+					for(uint32_t i=0; i<index; i++){
+						cur = cur->next;
+					}
+					evicted_id = cur->qpc_id;
+					cur->qpc_id = value;
+				}
+			}else{
+				if(qpc_num < MAX_QPC_NUM * 2){
+					qpc_num++;
+					QpcInfo* newQpc = new QpcInfo(value);
+					if(head == nullptr){
+						head = newQpc;
+						tail = newQpc;
+					}else{
+						tail->next = newQpc;
+						tail = newQpc;
+					}
+				}else{
+					std::random_device rd;
+					std::mt19937 gen(rd());
+					std::uniform_int_distribution<> dis(0, MAX_QPC_NUM*2-1);
+					uint32_t index = dis(gen);
+					QpcInfo* cur = head;
+					for(uint32_t i=0; i<index; i++){
+						cur = cur->next;
+					}
+					evicted_id = cur->qpc_id;
+					cur->qpc_id = value;
+				}
+			}
 		}
-		if(!Settings::use_xrc){  // 没有使用 XRC ，仅是正常的 RC 
-			if(qpc_num < MAX_QPC_NUM){
-				qpc_num++;
-				QpcInfo* newQpc = new QpcInfo(value);
-				if(head == nullptr){
-					head = newQpc;
-					tail = newQpc;
-				}else{
-					tail->next = newQpc;
-					tail = newQpc;
-				}
-			}else{
-				std::random_device rd;
-				std::mt19937 gen(rd());
-				std::uniform_int_distribution<> dis(0, MAX_QPC_NUM-1);
-				uint32_t index = dis(gen);
-				QpcInfo* cur = head;
-				for(uint32_t i=0; i<index; i++){
-					cur = cur->next;
-				}
-				cur->qpc_id = value;
-			}
-		}else{  // 如果使用 XRC 模式，那么由于是共享接收队列，因此可以容纳的 QPC 数量增大，近似认为是 2 倍
-			// 在 insert 函数加入 XRC 建模之后，AddQueuePair、GetNxtPacket、DequeueAndTransmit、ReceiveAck函数会调用 insert 函数，因此基本无需额外修改
-			// AddQueuePair、GetNxtPacket、DequeueAndTransmit函数判断 contains 以及进行 insert ，已经考虑了带宽和时延，因此无需额外修改
-			// ReceiveAck 函数需要额外加入时延，这是由于共享接收队列会导致一定的延迟，但是总体上应该小于 PCIe 的时延，设置为 PCIe 时延的一半
-			if(qpc_num < MAX_QPC_NUM * 2){
-				qpc_num++;
-				QpcInfo* newQpc = new QpcInfo(value);
-				if(head == nullptr){
-					head = newQpc;
-					tail = newQpc;
-				}else{
-					tail->next = newQpc;
-					tail = newQpc;
-				}
-			}else{
-				std::random_device rd;
-				std::mt19937 gen(rd());
-				std::uniform_int_distribution<> dis(0, MAX_QPC_NUM*2-1);
-				uint32_t index = dis(gen);
-				QpcInfo* cur = head;
-				for(uint32_t i=0; i<index; i++){
-					cur = cur->next;
-				}
-				cur->qpc_id = value;
-			}
+		return evicted_id;
+	}
+
+	/*[hyx]*/
+	// Janus: LRU touch - 标记最近使用
+	void QpcCache::touch(uint32_t value){
+		if(!Settings::qpc_cache_lru) return;
+		auto it = lru_map.find(value);
+		if(it != lru_map.end()){
+			it->second->last_access_time = Simulator::Now().GetNanoSeconds();
+			it->second->is_prefetched = false;
+			LruMoveToHead(lru_head, lru_tail, it->second);
 		}
 	}
 
+	/*[hyx]*/
+	// Janus: 从缓存中移除 QPC
+	void QpcCache::remove(uint32_t value){
+		if(!Settings::qpc_cache_lru) return;
+		auto it = lru_map.find(value);
+		if(it != lru_map.end()){
+			QpcNode* node = it->second;
+			lru_map.erase(it);
+			if(node->prev) node->prev->next = node->next;
+			if(node->next) node->next->prev = node->prev;
+			if(node == lru_head) lru_head = node->next;
+			if(node == lru_tail) lru_tail = node->prev;
+			delete node;
+			lru_num--;
+		}
+	}
+
+	/*[hyx]*/
+	// Janus: 当前缓存中的 QPC 数量
+	uint32_t QpcCache::size(){
+		if(Settings::qpc_cache_lru) return lru_num;
+		return qpc_num;
+	}
+
+	/*[hyx]*/
+	// Janus: 打印 QPC 缓存内容
 	void QpcCache::print(){
-		QpcInfo* cur = head;
-		while(cur != nullptr){
-			std::cout<<"Qpc id: "<<cur->qpc_id<<std::endl;
-			cur = cur->next;
+		if(Settings::qpc_cache_lru){
+			QpcNode* cur = lru_head;
+			while(cur != nullptr){
+				std::cout<<"Qpc id: "<<cur->qpc_id
+					<<" prefetched: "<<cur->is_prefetched
+					<<" last_access: "<<cur->last_access_time<<std::endl;
+				cur = cur->next;
+			}
+		}else{
+			QpcInfo* cur = head;
+			while(cur != nullptr){
+				std::cout<<"Qpc id: "<<cur->qpc_id<<std::endl;
+				cur = cur->next;
+			}
 		}
 		std::cout<<std::endl;
 	}
@@ -353,12 +471,21 @@ namespace ns3 {
 			last_qIndex = 0;
 		}
 
+		/*[hyx]*/
+		// Janus: QPC 预取初始化
+		m_prefetchPredictor = nullptr;
+		m_nopWqeManager = nullptr;
+
 		m_rdmaEQ = CreateObject<RdmaEgressQueue>();
 	}
 
 	QbbNetDevice::~QbbNetDevice()
 	{
 		NS_LOG_FUNCTION(this);
+		/*[hyx]*/
+		// Janus: 清理预取系统
+		if(m_prefetchPredictor) delete m_prefetchPredictor;
+		if(m_nopWqeManager) delete m_nopWqeManager;
 	}
 
 	void
@@ -470,9 +597,30 @@ namespace ns3 {
 					// qpc
 					// for DCT
 					if(!Settings::use_dct){
-						// DCT 不会造成 qpc 的丢失，因此只有非 DCT 的方案才需要考虑 qpc cache 是否在 list 之中的情况    
-						if(qpccache.contains(qIndex)){
+						// DCT 不会造成 qpc 的丢失，因此只有非 DCT 的方案才需要考虑 qpc cache 是否在 list 之中的情况
+						/*[hyx]*/
+						// 获取 QP 的 qpid（注意 qIndex 是队列索引，m_qpid 是 QPC 全局 ID）
+						Ptr<RdmaQueuePair> qpcQp = m_rdmaEQ->GetQp(qIndex);
+						uint32_t qpc_id = qpcQp ? qpcQp->m_qpid : (uint32_t)qIndex;
+						if(qpccache.contains(qpc_id)){
 							delay += 0;
+							/*[hyx]*/
+							// Janus: LRU 标记最近使用
+							qpccache.touch(qpc_id);
+							// Janus: 记录 cache hit
+							if(m_prefetchPredictor && Settings::use_janus){
+								m_prefetchPredictor->RecordAccess(qpc_id, true);
+								m_nopWqeManager->MarkPrefetchUsed(qpc_id);
+							}
+						}else if(Settings::use_janus && m_nopWqeManager && 
+						         m_nopWqeManager->IsPrefetching(qpc_id)){
+							/*[hyx]*/
+							// Janus: QPC 正在预取中，使用部分延迟
+							delay += PCIeDelay / (2 * 1e6);
+							// 不需要 MTT/MPT 额外延迟（预取的 NOP WQE 已经包含了）
+							if(m_prefetchPredictor){
+								m_prefetchPredictor->RecordAccess(qpc_id, false);
+							}
 						}else{
 							delay += PCIeDelay / 1e6;
 							// extra pcie delay for mtt mpt related with qpc
@@ -481,6 +629,11 @@ namespace ns3 {
 								delay += PCIeDelay / 1e6;  // us -> s
 							}else{
 								delay += 0;	 // no delay
+							}
+							/*[hyx]*/
+							// Janus: 记录 cache miss
+							if(m_prefetchPredictor && Settings::use_janus){
+								m_prefetchPredictor->RecordAccess(qpc_id, false);
 							}
 						}
 					}
@@ -511,8 +664,24 @@ namespace ns3 {
 				if(!Settings::use_weir){
 					wqecache.increment();
 				}
-					// qpc insert qpid for lastQp
-					qpccache.insert(lastQp->m_qpid);
+				/*[hyx]*/
+				// Janus: qpc insert qpid for lastQp
+				// 如果 QPC 正在预取中，跳过 insert（NOP WQE 完成后会自动 insert）
+				// 否则会造成双重 insert 和延迟模型语义矛盾
+				bool is_prefetching = (Settings::use_janus && m_nopWqeManager &&
+				                       m_nopWqeManager->IsPrefetching(lastQp->m_qpid));
+				if(!is_prefetching){
+					uint32_t evicted_id = qpccache.insert(lastQp->m_qpid);
+					// 如果有 QPC 被替换，更新预取管理器和预测器
+					if(evicted_id != 0xFFFFFFFF){
+						if(m_nopWqeManager){
+							m_nopWqeManager->CheckAndMarkUselessPrefetch(evicted_id);
+						}
+						if(m_prefetchPredictor){
+							m_prefetchPredictor->UpdateCacheStatus(evicted_id, false);
+						}
+					}
+				}
 				}
 
 				// transmit
@@ -925,4 +1094,114 @@ namespace ns3 {
 			m_nextSend = Simulator::Schedule(delta, &QbbNetDevice::DequeueAndTransmit, this);
 		}
 	}
+
+	/*[hyx]*/
+	// ========== Janus: QPC 预取相关方法 ==========
+
+	void QbbNetDevice::InitPrefetch(){
+		if(!Settings::use_janus) return;
+		
+		m_prefetchPredictor = new QpcPrefetchPredictor();
+		m_nopWqeManager = new NopWqeManager();
+		
+		// 调度第一个预取周期（延迟到仿真开始 2s 后，与流量对齐）
+		Simulator::Schedule(Seconds(2.0), &QbbNetDevice::ScheduleNextPrefetchCycle, this);
+	}
+
+	void QbbNetDevice::PerformPrefetch(){
+		if(!Settings::use_janus) return;
+		if(!m_prefetchPredictor || !m_nopWqeManager) return;
+
+		uint32_t prefetch_count = 0;
+
+		if(Settings::prefetch_mode == 1){ // Oracle 模式
+			uint64_t now = Simulator::Now().GetNanoSeconds();
+			std::vector<uint32_t> upcoming = m_prefetchPredictor->GetUpcomingFlows(
+				now, Settings::prefetch_ahead_time, this);
+			for(uint32_t qpc_id : upcoming){
+				if(prefetch_count >= Settings::max_prefetch_per_cycle) break;
+				if(qpccache.contains(qpc_id)) continue;
+				if(m_nopWqeManager->IsPrefetching(qpc_id)) continue;
+				IssueNopWqeForPrefetch(qpc_id);
+				prefetch_count++;
+			}
+		}else{
+			// 统计模式 / LRU 模式
+			std::vector<uint32_t> targets = m_prefetchPredictor->GetPrefetchTargets(this);
+			for(uint32_t qpc_id : targets){
+				if(prefetch_count >= Settings::max_prefetch_per_cycle) break;
+				if(qpccache.contains(qpc_id)) continue;
+				if(m_nopWqeManager->IsPrefetching(qpc_id)) continue;
+				IssueNopWqeForPrefetch(qpc_id);
+				prefetch_count++;
+			}
+		}
+
+		// 更新预测器
+		m_prefetchPredictor->UpdatePredictions();
+
+		// 调度下一个预取周期
+		ScheduleNextPrefetchCycle();
+	}
+
+	void QbbNetDevice::ScheduleNextPrefetchCycle(){
+		if(Settings::use_janus){
+			Simulator::Schedule(NanoSeconds(Settings::prefetch_interval), 
+			                    &QbbNetDevice::PerformPrefetch, this);
+		}
+	}
+
+	void QbbNetDevice::IssueNopWqeForPrefetch(uint32_t qpc_id){
+		if(!m_nopWqeManager || !m_prefetchPredictor) return;
+
+		// 1. 记录 NOP WQE 发出
+		m_nopWqeManager->IssueNopWqe(qpc_id);
+		m_prefetchPredictor->m_prefetchIssuedCount++;
+		// 标记该 QPC 已发起预取（防止重复预取）
+		m_prefetchPredictor->MarkPrefetching(qpc_id);
+
+		// 2. 计算完成延迟（延迟模型）
+		double nop_latency = NOP_WQE_DOORBELL_LATENCY; // 0.5 us
+
+		// 检查 QPC 是否已在缓存（如果已在，NOP WQE 开销极小）
+		if(!qpccache.contains(qpc_id)){
+			// QPC 不在缓存，需要 DMA 读取
+			nop_latency += PCIeDelay; // 1.0 us
+			// MTT/MPT 可能缺失
+			int mtt_mpt_prob = generateMttMptProbability2();
+			if(mtt_mpt_prob == 0){
+				nop_latency += PCIeDelay; // 额外 1.0 us
+			}
+		}
+		nop_latency += NOP_WQE_CQE_LATENCY; // 0.3 us
+
+		// 3. 调度 NOP WQE 完成事件
+		Simulator::Schedule(MicroSeconds(nop_latency), 
+		                    &QbbNetDevice::OnNopWqeComplete, this, qpc_id);
+	}
+
+	void QbbNetDevice::OnNopWqeComplete(uint32_t qpc_id){
+		/*[hyx]*/
+		// Janus: NOP WQE 完成，QPC 已加载到缓存
+		// 插入 QPC 缓存，标记为预取
+		uint32_t evicted_id = qpccache.insert(qpc_id, true);
+
+		// 通知 NopWqeManager 完成
+		m_nopWqeManager->OnNopWqeComplete(qpc_id);
+
+		// 如果有 QPC 被替换，检查是否为预取的 QPC
+		if(evicted_id != 0xFFFFFFFF && m_nopWqeManager){
+			m_nopWqeManager->CheckAndMarkUselessPrefetch(evicted_id);
+		}
+
+		// 通知预测器预取完成，更新缓存状态
+		if(m_prefetchPredictor){
+			m_prefetchPredictor->UpdateCacheStatus(qpc_id, true);
+			// 如果有 QPC 被替换，更新其缓存状态
+			if(evicted_id != 0xFFFFFFFF){
+				m_prefetchPredictor->UpdateCacheStatus(evicted_id, false);
+			}
+		}
+	}
+
 } // namespace ns3
